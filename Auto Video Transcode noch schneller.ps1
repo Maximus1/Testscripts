@@ -1,6 +1,6 @@
 #region Konfiguration
 # Pfad zur FFmpeg-Anwendung. Dieser muss korrekt gesetzt sein, damit das Skript funktioniert.
-$ffmpegPath = "F:\media-autobuild_suite-master1\local64\bin-video\ffmpeg.exe"
+$ffmpegPath = "F:\ffmpeg-2025-11-02-git-f5eb11a71d-full_build\bin\ffmpeg.exe"
 # Pfad zur mkvextract-Anwendung aus dem MKVToolNix-Paket.
 $mkvextractPath = "C:\Program Files\MKVToolNix\mkvextract.exe"
 
@@ -140,7 +140,7 @@ function Get-FFmpegOutput {
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $ffmpegPath
-    $startInfo.Arguments = "-hwaccel d3d11va -i `"$FilePath`""
+    $startInfo.Arguments = "-i `"$FilePath`""
     $startInfo.RedirectStandardError = $true
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
@@ -175,6 +175,15 @@ function Get-BasicVideoInfo {
     if ($Output -match "Video:\s*([^\s,]+)") {
         $info.VideoCodecSource = $matches[1]
         $info.VideoCodec = $matches[1]
+        if ($info.VideoCodecSource -ne "AV1" -and $info.VideoCodecSource -ne "av1") {
+            Write-Host "  -> Hardwarebeschleunigung aktiviert für Nicht-AV1-Codecs." -ForegroundColor Cyan
+            "`n====  -> Hardwarebeschleunigung aktiviert für Nicht-AV1-Codecs. ===" | Add-Content -LiteralPath $logDatei
+        }
+        if ($info.VideoCodecSource -eq "AV1") {
+            $info.NoAccel = $true
+            Write-Host "  -> Hardwarebeschleunigung deaktiviert für AV1-Codecs." -ForegroundColor Cyan
+            "`n====  -> Hardwarebeschleunigung deaktiviert für AV1-Codecs. ===" | Add-Content -LiteralPath $logDatei
+        }
     }
 
     if ($Output -match "Video:.*?,\s+(\d+)x(\d+)") {
@@ -312,34 +321,34 @@ function Get-RecodeAnalysis {
         [hashtable]$MediaInfo,
         [string]$logDatei
     )
-
+    $info = @{}
     # Prüft zuerst, ob der Codec bereits dem Zielcodec entspricht.
-    if ($sourceInfo.VideoCodecSource -ne $videoCodecHEVC) {
-        $mediaInfo = @{ RecodeRecommended = $true }
-        Write-Host "Recode erforderlich: Video-Codec ist '$($sourceInfo.VideoCodecSource)' und nicht '$videoCodecHEVC'." -ForegroundColor Yellow
-        "`n==== Recode erforderlich: Video-Codec ist '$($sourceInfo.VideoCodecSource)' und nicht '$videoCodecHEVC'. ====" | Add-Content -LiteralPath $logDatei
+    if ($mediaInfo.VideoCodecSource -ne $videoCodecHEVC) {
+        $info = @{ RecodeRecommended = $true }
+        Write-Host "Recode erforderlich: Video-Codec ist '$($mediaInfo.VideoCodecSource)' und nicht '$videoCodecHEVC'." -ForegroundColor Yellow
+        "`n==== Recode erforderlich: Video-Codec ist '$($mediaInfo.VideoCodecSource)' und nicht '$videoCodecHEVC'. ====" | Add-Content -LiteralPath $logDatei
     }
     else {
         # Wenn der Codec bereits korrekt ist, wird die Dateigröße geprüft.
-        $fileSizeBytes = $MediaInfo.FileSizeBytes
+        $fileSizeBytes = $mediaInfo.FileSizeBytes
         $fileSizeMB = $fileSizeBytes / 1MB
-        $duration = $MediaInfo.Duration
+        $duration = $mediaInfo.Duration
         # Berechnet die erwartete Dateigröße basierend auf der Laufzeit und vordefinierten Qualitätsraten.
-        $expectedSizeMB = Measure-ExpectedSizeMB -durationSeconds $duration -isSeries $MediaInfo.IsSeries -logDatei $logDatei
+        $expectedSizeMB = Measure-ExpectedSizeMB -durationSeconds $duration -isSeries $mediaInfo.IsSeries -logDatei $logDatei
         # Empfiehlt eine Neukodierung, wenn die Datei signifikant (hier >50%) größer als erwartet ist.
         if ($fileSizeMB -gt ($expectedSizeMB * 1.5)) {
-            $mediaInfo = @{ RecodeRecommended = $true }
+            $info = @{ RecodeRecommended = $true }
             Write-Host "Recode empfohlen: Datei ist deutlich größer als erwartet ($([math]::Round($fileSizeMB,2)) MB > $expectedSizeMB MB)" -ForegroundColor Yellow
             "`n==== Recode empfohlen: Datei ist deutlich größer als erwartet ($([math]::Round($fileSizeMB,2)) MB > $expectedSizeMB MB) ====" | Add-Content -LiteralPath $logDatei
         }
         else {
-            $mediaInfo = @{ RecodeRecommended = $false }
+            $info = @{ RecodeRecommended = $false }
             Write-Host "Kein Recode nötig: Dateigröße ist im erwarteten Bereich ($([math]::Round($fileSizeMB,2)) MB ≤ $expectedSizeMB MB)" -ForegroundColor Green
             "`n==== Kein Recode nötig: Dateigröße ist im erwarteten Bereich ($([math]::Round($fileSizeMB,2)) MB ≤ $expectedSizeMB MB) ====" | Add-Content -LiteralPath $logDatei
         }
     }
 
-    return $mediaInfo
+    return $info
 }
 function Measure-ExpectedSizeMB {
     param (
@@ -448,8 +457,15 @@ function Get-LoudnessInfo {
         Write-Host "Starte FFmpeg zur Lautstärkeanalyse..." -ForegroundColor Cyan;
         "`n==== Starte FFmpeg zur Lautstärkeanalyse für $filePath ====" | Add-Content -LiteralPath $logDatei
 
-        $ffmpegProcess = Start-Process -FilePath $ffmpegPath -ArgumentList "-i", "`"$($filePath)`"", "-vn", "-hide_banner", "-threads", "12", "-filter_complex", "[0:a:0]ebur128=metadata=1", "-f", "null", "NUL" -NoNewWindow -PassThru -RedirectStandardError $tempOutputFile
-        $ffmpegProcess.WaitForExit()
+        if ($sourceInfo.NoAccel) {
+            $ffmpegProcess = Start-Process -FilePath $ffmpegPath -ArgumentList "-i", "`"$($filePath)`"", "-vn", "-hide_banner", "-threads", "12", "-filter_complex", "[0:a:0]ebur128=metadata=1", "-f", "null", "NUL" -NoNewWindow -PassThru -RedirectStandardError $tempOutputFile
+            $ffmpegProcess.WaitForExit()
+        }
+        else {
+            $ffmpegProcess = Start-Process -FilePath $ffmpegPath -ArgumentList "-hwaccel", "d3d11va", "-i", "`"$($filePath)`"", "-vn", "-hide_banner", "-threads", "12", "-filter_complex", "[0:a:0]ebur128=metadata=1", "-f", "null", "NUL" -NoNewWindow -PassThru -RedirectStandardError $tempOutputFile
+            $ffmpegProcess.WaitForExit()
+        }
+
         # Liest die Analyseergebnisse aus der temporären Datei.
         $ffmpegOutput = Get-Content -Path $tempOutputFile -Raw
         # Löscht die temporäre Datei nach der Analyse.
@@ -480,11 +496,18 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
             "-loglevel", "error",
             "-stats",
             "-y",
-            "-hwaccel", "d3d11va", # Hardwarebeschleunigung für die Dekodierung aktivieren
             "-threads", "12", # Nutze alle verfügbaren CPU-Threads für maximale Leistung
             "-i", "`"$($filePath)`""
         )
-
+# Hardwarebeschleunigung deaktivieren, wenn NoAccel gesetzt ist
+        if ($sourceInfo.NoAccel) {
+            Write-Host "  -> Hardwarebeschleunigung für decoding wegen AV1 Codec deaktiviert." -ForegroundColor Cyan
+            "`n====  -> Hardwarebeschleunigungfür decoding wegen AV1 Codec deaktiviert. ===" | Add-Content -LiteralPath $logDatei
+        }else {
+            $ffmpegArguments += @(
+            "-hwaccel", "d3d11va" # Hardwarebeschleunigung für die Dekodierung aktivieren
+            )
+        }
 # Prüfen ob BitDepth != 8 → immer reencode zu HEVC 8bit
         $needsReencodeDueToBitDepth = $false
         if ($bitDepth -ne 8) {
@@ -493,14 +516,14 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
         $needsReencodeDueToBitDepth = $true
         }
 
-        # Prüfen, ob es sich um eine alte AVI-Datei handelt, die eine Sonderbehandlung benötigt
+# Prüfen, ob es sich um eine alte AVI-Datei handelt, die eine Sonderbehandlung benötigt
         $isAviFile = [System.IO.Path]::GetExtension($filePath).ToLowerInvariant() -eq '.avi'
 
         if ($isAviFile) {
             Write-Host "🎞️ AVI-Spezialbehandlung: Visuelle Verbesserung und Transkodierung zu HEVC 1080p..." -ForegroundColor Magenta
             "`n==== AVI-Spezialbehandlung: Visuelle Verbesserung und Transkodierung zu HEVC 1080p... ====" | Add-Content -LiteralPath $logDatei
 
-            # Stellt die Filterkette dynamisch zusammen, basierend darauf, ob das Material interlaced ist.
+# Stellt die Filterkette dynamisch zusammen, basierend darauf, ob das Material interlaced ist.
             $baseFilter = "hqdn3d=1.0:1.5:3.0:4.5,scale=1920:-2,cas=strength=0.15"
             if ($interlaced) {
                 Write-Host "  -> AVI ist interlaced, wende Deinterlacing an." -ForegroundColor Cyan
@@ -519,7 +542,7 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
                 "-x265-params", "aq-mode=4:psy-rd=1.5:psy-rdoq=0.7:rd=3:bframes=8:ref=4:deblock=-1,-1:me=umh:subme=5:rdoq-level=1"
             )
         }
-        # Prüft verschiedene Bedingungen, um zu entscheiden, ob eine Video-Neukodierung erforderlich ist.
+# Prüft verschiedene Bedingungen, um zu entscheiden, ob eine Video-Neukodierung erforderlich ist.
         elseif ($sourceInfo.Force720p -or $sourceInfo.NeedsRecode -or $needsReencodeDueToBitDepth -or ($videoCodec -ne $videoCodecHEVC)) {
             Write-Host "🎞️ Transcode aktiv..." -ForegroundColor Cyan
 
@@ -532,9 +555,9 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
                 "-max_muxing_queue_size", "1024"
             )
 
-            # Wendet unterschiedliche CRF-Werte für Filme und Serien an, um die Qualität zu steuern.
+# Wendet unterschiedliche CRF-Werte für Filme und Serien an, um die Qualität zu steuern.
             if ($sourceInfo.IsSeries -eq $true) {
-                # Wenn die Framerate einer Serie über 25 FPS liegt, wird sie auf 25 FPS begrenzt.
+# Wenn die Framerate einer Serie über 25 FPS liegt, wird sie auf 25 FPS begrenzt.
                 if($sourceInfo.FPS -gt 25){
                     Write-Host "🎞️ Framerate > 25 FPS erkannt. Begrenze auf 25 FPS." -ForegroundColor Magenta
                     $ffmpegArguments += @("-r", "25")
@@ -548,7 +571,7 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
                 "`n==== Auf Filmauflösung-Anpassungen... $crfTargetm ====" | Add-Content -LiteralPath $logDatei
             }
 
-            # Wendet die entsprechenden Videofilter an (Deinterlacing, Skalierung, Rauschreduktion).
+# Wendet die entsprechenden Videofilter an (Deinterlacing, Skalierung, Rauschreduktion).
             if ($sourceInfo.Interlaced -eq $true) {
                 if ($sourceInfo.Force720p -eq $true) {
                     Write-Host "↘️ Deinterlace + Scaling auf 720p" -ForegroundColor Cyan
@@ -566,19 +589,19 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
                 $ffmpegArguments += @("-vf", "scale=1280:-2")
             }
         } else {
-            # Kopiert den Videostream 1:1, wenn keine Neukodierung erforderlich ist.
+# Kopiert den Videostream 1:1, wenn keine Neukodierung erforderlich ist.
             Write-Host "📼 Video wird kopiert (HEVC, 8 Bit und Größe OK)" -ForegroundColor Green
             "`n==== Video wird kopiert (HEVC, 8 Bit und Größe OK) ====" | Add-Content -LiteralPath $logDatei
             $ffmpegArguments += @("-c:v", "copy")
         }
 
-        # Entscheidet über die Audiokodierung basierend auf der Lautstärkeabweichung und der Kanalanzahl.
+# Entscheidet über die Audiokodierung basierend auf der Lautstärkeabweichung und der Kanalanzahl.
         if ([math]::Abs($gain) -gt 0.2) {
             switch ($audioChannels) {
                 { $_ -gt 2 } {
-                    Write-Host "🔊 Audio: Surround → Transcode" -ForegroundColor Cyan;
-                    "`n==== Audio: Surround → Transcode ====" | Add-Content -LiteralPath $logDatei
-                    # libfdk_aac mit VBR 5 für hohe Surround-Qualität
+                    Write-Host "🔊 Audio: Surround → Transcode VBR 5 für hohe Surround-Qualität" -ForegroundColor Cyan;
+                    "`n==== Audio: Surround → Transcode VBR 5 für hohe Surround-Qualität ====" | Add-Content -LiteralPath $logDatei
+# libfdk_aac mit VBR 5 für hohe Surround-Qualität
                     $ffmpegArguments += @(
                         "-c:a", "libfdk_aac", # Bester AAC-Encoder
                         "-vbr", "5",          # Höchste VBR-Qualität für Surround
@@ -586,9 +609,9 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
                     )
                 }
                 2 {
-                    Write-Host "🔉 Audio: Stereo → Transcode" -ForegroundColor Cyan;
-                    "`n==== Audio: Stereo → Transcode ====" | Add-Content -LiteralPath $logDatei
-                    # libfdk_aac mit VBR 4 für exzellente Stereo-Qualität (transparent)
+                    Write-Host "🔉 Audio: Stereo → Transcode VBR 4 für exzellente Stereo-Qualität" -ForegroundColor Cyan;
+                    "`n==== Audio: Stereo → Transcode VBR 4 für exzellente Stereo-Qualität ====" | Add-Content -LiteralPath $logDatei
+# libfdk_aac mit VBR 4 für exzellente Stereo-Qualität (transparent)
                     $ffmpegArguments += @(
                         "-c:a", "libfdk_aac", # Bester AAC-Encoder
                         "-vbr", "4",          # Exzellente VBR-Qualität für Stereo
@@ -596,9 +619,9 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
                     )
                 }
                 default {
-                    Write-Host "🔈 Audio: Mono → Transcode" -ForegroundColor Cyan;
-                    "`n==== Audio: Mono → Transcode ====" | Add-Content -LiteralPath $logDatei
-                    # libfdk_aac mit VBR 3 für gute und effiziente Mono-Qualität
+                    Write-Host "🔈 Audio: Mono → Transcode High-Efficiency Profil für niedrige Bitraten" -ForegroundColor Cyan;
+                    "`n==== Audio: Mono → Transcode High-Efficiency Profil für niedrige Bitraten ====" | Add-Content -LiteralPath $logDatei
+# libfdk_aac mit VBR 3 für gute und effiziente Mono-Qualität
                     $ffmpegArguments += @(
                         "-c:a", "libfdk_aac", # Bester AAC-Encoder
                         "-profile:a", "aac_he_v2", # High-Efficiency Profil für niedrige Bitraten
@@ -608,11 +631,13 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
             }
         }
         else {
+            Write-Host "🔈 Audio-Gain vernachlässigbar (±0.2 dB) → Audio wird kopiert" -ForegroundColor Green;
+            "`n==== Audio-Gain vernachlässigbar (±0.2 dB) → Audio wird kopiert ====" | Add-Content -LiteralPath $logDatei
             $ffmpegArguments += @(
                 "-c:a", "copy" # Copy audio stream if gain is negligible (±0.2 dB)
             )
         }
-        # Fügt die finalen Argumente hinzu: Lautstärkeanpassung, Untertitel kopieren und Metadaten setzen.
+# Fügt die finalen Argumente hinzu: Lautstärkeanpassung, Untertitel kopieren und Metadaten setzen.
         $ffmpegArguments += @(
             "-af", "volume=${gain}dB",
             "-c:s", "copy",
@@ -626,7 +651,7 @@ function Set-VolumeGain {# Funktion zur Anpassung der Lautstärke mit FFmpeg
         "`n==== FFmpeg-Argumente: $($ffmpegArguments -join ' ') ====" | Add-Content -LiteralPath $logDatei
 
 
-        # Startet den FFmpeg-Prozess mit den zusammengestellten Argumenten.
+# Startet den FFmpeg-Prozess mit den zusammengestellten Argumenten.
         $process = Start-Process -FilePath $ffmpegPath -ArgumentList $ffmpegArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
         if ($process.ExitCode -eq 0) {
             Write-Host "Lautstärkeanpassung abgeschlossen für: $($filePath)" -ForegroundColor Green
@@ -654,13 +679,13 @@ function Test-OutputFile {# Überprüfe die Ausgabedatei, sobald der Prozess abg
     Write-Host "Überprüfe Ausgabedatei und ggf. Quelldatei" -ForegroundColor Cyan
     "`n==== Überprüfe Ausgabedatei und ggf. Quelldatei ====" | Add-Content -LiteralPath $logDatei
 
-    # Eine kurze Pause, um sicherzustellen, dass das Betriebssystem den Dateihandle vollständig freigegeben hat.
+# Eine kurze Pause, um sicherzustellen, dass das Betriebssystem den Dateihandle vollständig freigegeben hat.
     Start-Sleep -Seconds 2
 
     Test_Fileintregity -Outputfile $outputFile -ffmpegPath $ffmpegPath -destFolder $destFolder -file $sourceFile -logDatei $logDatei
 
     $outputInfo = Get-MediaInfo2 -filePath $outputFile
-    # Prüft, ob die Metadaten der Ausgabedatei erfolgreich gelesen werden konnten.
+# Prüft, ob die Metadaten der Ausgabedatei erfolgreich gelesen werden konnten.
     if ($outputInfo.Duration -eq 0 -or $outputInfo.AudioChannels -eq 0) {
         Write-Host "  FEHLER: Konnte Mediendaten für die Ausgabedatei nicht korrekt extrahieren." -ForegroundColor Red
         "`n==== FEHLER: Konnte Mediendaten für die Ausgabedatei nicht korrekt extrahieren. ====" | Add-Content -LiteralPath $logDatei
@@ -671,18 +696,18 @@ function Test-OutputFile {# Überprüfe die Ausgabedatei, sobald der Prozess abg
         Write-Host "  Quelldatei-Dauer: $($sourceInfo.DurationFormatted1) | Audiokanäle: $($sourceInfo.AudioChannels)" -ForegroundColor Blue
         Write-Host "  Ausgabedatei-Dauer: $($outputInfo.DurationFormatted) | Audiokanäle: $($outputInfo.AudioChannels)" -ForegroundColor Blue
 
-        # Ruft die Dateigrößen in Bytes für einen exakten numerischen Vergleich ab.
+# Ruft die Dateigrößen in Bytes für einen exakten numerischen Vergleich ab.
         $sizeSourceBytes = (Get-Item -LiteralPath $sourceFile).Length
         $sizeOutputBytes = (Get-Item -LiteralPath $outputFile).Length
 
-        # Formatiert die Dateigrößen in ein lesbares MB-Format nur für die Konsolenausgabe.
+# Formatiert die Dateigrößen in ein lesbares MB-Format nur für die Konsolenausgabe.
         $fileSizeSourceFormatted = "{0:N2} MB" -f ($sizeSourceBytes / 1MB)
         $fileSizeOutputFormatted = "{0:N2} MB" -f ($sizeOutputBytes / 1MB)
 
         Write-Host "  Quelldatei-Größe: $($fileSizeSourceFormatted)" -ForegroundColor DarkCyan
         Write-Host "  Ausgabedatei-Größe: $($fileSizeOutputFormatted)" -ForegroundColor DarkCyan
 
-        # Prüft, ob die Ausgabedatei mehr als 3 MB größer ist als die Quelldatei.
+# Prüft, ob die Ausgabedatei mehr als 3 MB größer ist als die Quelldatei.
         if ($sizeOutputBytes -gt ($sizeSourceBytes + 3MB)) {
             $diffMB = [math]::Round(($sizeOutputBytes - $sizeSourceBytes) / 1MB, 2)
             Write-Host "  WARNUNG: Die Ausgabedatei ist $diffMB MB größer als die Quelldatei!" -ForegroundColor Red
@@ -749,7 +774,7 @@ function Test_Fileintregity {
     $argumentso = @()
     $argumentso = @(
         "-v", "error",
-        "-hwaccel", "d3d11va",
+        #"-hwaccel", "d3d11va",
         "-i", "`"$outputFile`"",
         "-f", "null",
         "-"
@@ -758,7 +783,7 @@ function Test_Fileintregity {
     $argumentsi = @()
     $argumentsi = @(
         "-v", "error",
-        "-hwaccel", "d3d11va",
+        #"-hwaccel", "d3d11va",
         "-i", "`"$file`"",
         "-f", "null",
         "-"
@@ -972,7 +997,7 @@ if ($result -eq [Windows.Forms.DialogResult]::OK) {
         try {
             # Extrahiert die Metadaten der Quelldatei.
             $sourceInfo = Get-MediaInfo -filePath $file -logDatei $logDatei
-            if (!$sourceInfo) {
+            if (!$sourceInfo.VideoCodecSource) {
                 throw "Konnte Mediendaten nicht extrahieren."
             }
 
